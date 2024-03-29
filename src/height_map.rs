@@ -1,8 +1,11 @@
-use bespoke_engine::{binding::Descriptor, model::{Model, ToRaw}};
+use bespoke_engine::{binding::{Descriptor, UniformBinding}, model::{Model, ToRaw}, texture::Texture};
+use bespoke_engine::compute::ComputeShader;
 use bytemuck::{bytes_of, NoUninit};
-use cgmath::{InnerSpace, Vector3};
+use cgmath::{InnerSpace, Quaternion, Rotation3, Vector3};
 use image::{DynamicImage, GenericImageView, ImageError};
-use wgpu::Device;
+use wgpu::{Device, Queue};
+
+use crate::instance::Instance;
 
 #[repr(C)]
 #[derive(NoUninit, Copy, Clone)]
@@ -20,9 +23,8 @@ impl Vertex {
 
 impl Descriptor for Vertex {
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        use std::mem;
         wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute {
@@ -109,7 +111,49 @@ impl HeightMap {
                 }
             }
         }
-        let model = Model::new(vertices, &indices, device);
+        let model = Model::new_instances(vertices, &indices, vec![
+            Instance { position: Vector3::new(0.0, 0.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)) },
+            // Instance { position: Vector3::new(0.0, 10.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)) },
+        ], device);
+        Ok(Self {
+            model,
+            width: image.width(),
+            height: image.height(),
+            size,
+            image,
+            height_multiplier,
+        })
+    }
+
+    pub fn from_bytes_compute(device: &Device, queue: &Queue, image_bytes: &[u8], res: u32, size: f32, height_multiplier: f32, gen_normals: bool) -> Result<Self, ImageError> {
+        let image = image::load_from_memory(image_bytes)?;
+        let width = image.width()/res;
+        let height = image.height()/res;
+        let mut indices = vec![];
+        for x in 0..width {
+            for y in 0..height {
+                if x < width-1 && y < height-1 {
+                    let i = x * height + y;
+                    indices.append(&mut [i, i+1, i+height+1, i, i+height+1, i+height].to_vec());
+                }
+            }
+        }
+
+        let image_texture = Texture::from_bytes(device, queue, image_bytes, "Height Map", None).unwrap();
+        let compute_binding_type = Some(wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        });
+        let image_height_binding = UniformBinding::new(device, "Image Height", height, None);
+        let res_binding = UniformBinding::new(device, "Resolution", res, None);
+        let size_binding = UniformBinding::new(device, "World Size", size, None);
+        let height_multiplier_binding = UniformBinding::new(device, "Height Multiplier", height_multiplier, None);
+        let blank_vertices: &[u8] = &(0..width*height*std::mem::size_of::<Vertex>() as u32).map(|_| 0_u8).collect::<Vec<_>>();
+        let output_binding = UniformBinding::new_bytes(device, "Vertices Output", blank_vertices, compute_binding_type);
+        let compute_shader = ComputeShader::new(include_str!("height_gen.wgsl"), &[/*&image_texture.layout,*/ &image_height_binding.layout, &res_binding.layout, &size_binding.layout, &height_multiplier_binding.layout, &output_binding.layout], device);
+        compute_shader.run(&[/*image_texture.binding, */image_height_binding.binding, res_binding.binding, size_binding.binding, height_multiplier_binding.binding, output_binding.binding], [width, height, 1], device, queue);
+        let model = Model::new_vertex_buffer(output_binding.buffer, width*height, &indices, device);
         Ok(Self {
             model,
             width: image.width(),

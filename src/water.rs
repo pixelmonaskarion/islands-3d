@@ -17,8 +17,7 @@ impl Water {
             Vertex { position: [0.0, height, 0.0], tex_pos: [0.0, 0.0], normal: [0.0, 0.0, 0.0] },
         ];
         let model = Model::new_instances(vertices, &[0_u16, 3, 2, 1, 0, 2], vec![
-            Instance { position: Vector3::new(0.0, 0.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(00.0)) },
-            Instance { position: Vector3::new(0.0, 10.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)) }
+            Instance { position: Vector3::new(0.0, 0.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)) },
         ], device);
         Self {
             model

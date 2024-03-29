@@ -1,6 +1,11 @@
 use game::Game;
 use winit::{event_loop::EventLoop, window::WindowBuilder};
-use bespoke_engine::window::Surface;
+use bespoke_engine::window::{Surface, SurfaceContext};
+
+#[cfg(target_os = "android")] 
+use winit::platform::android::activity::AndroidApp;
+#[cfg(target_os = "android")] 
+use winit::event_loop::EventLoopBuilder;
 
 mod game;
 mod water;
@@ -14,11 +19,24 @@ async fn main() {
     common_main(event_loop).await;
 }
 
+#[allow(dead_code)]
+#[cfg(target_os = "android")]
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Info));
+
+    let event_loop = EventLoopBuilder::new().with_android_app(app).build().unwrap();
+    pollster::block_on(common_main(event_loop));
+}
+
 async fn common_main<T>(event_loop: EventLoop<T>) {
     let window = WindowBuilder::new().build(&event_loop).unwrap();
     let surface = Surface::new(&window).await;
-    window.set_cursor_grab(winit::window::CursorGrabMode::Locked).unwrap();
+    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
     window.set_cursor_visible(false);
-    let game = Game::new(&surface.device, &surface.queue, surface.config.format, window.inner_size());
-    surface.run(game, event_loop);
+    surface.run(event_loop, &|surface_context: &SurfaceContext| {
+        Game::new(&surface_context.device, &surface_context.queue, surface_context.config.format, window.inner_size())
+    });
 }

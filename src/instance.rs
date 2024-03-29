@@ -1,17 +1,21 @@
 use bespoke_engine::{binding::Descriptor, model::ToRaw};
+use bytemuck::bytes_of;
 
 pub struct Instance {
     pub position: cgmath::Vector3<f32>,
     pub rotation: cgmath::Quaternion<f32>,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    model: [[f32; 4]; 4],
+}
+
 impl ToRaw for Instance {
     fn to_raw(&self) -> Vec<u8> {
-        let raw: [[f32; 4]; 4] = (cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation)).into();
-        let raw = raw.concat();
-        let bytes: Vec<_> = raw.iter().map(|f| f.to_ne_bytes()).collect();
-        let bytes = bytes.concat();
-        bytes
+        let raw = InstanceRaw {model: (cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation)).into() };
+        bytes_of(&raw).to_vec()
     }
 }
 

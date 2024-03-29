@@ -16,16 +16,18 @@ wgpu = "0.19.1"
 bespoke-engine = { path = "../bespoke-engine" }
 log = "0.4.21"
 
-# [target.'cfg(target_os = "android")'.dependencies]
-# android_logger = "0.13.3"
-# winit = { version = "0.29.15", features = ["android-game-activity"] }
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13.3"
+winit = { version = "0.29.15", features = ["android-game-activity"] }
+pollster = "0.3.0"
 
-# [target.'cfg(not(target_os = "android"))'.dependencies]
+[target.'cfg(not(target_os = "android"))'.dependencies]
 winit = "0.29.15"
 
-# [lib]
-# name = "island3d_lib"
-# crate-type = ["cdylib"]
+[lib]
+name = "main"
+crate-type = ["cdylib"]
+path = "src/main.rs"
 
 # [package.metadata.android]
 # build_targets = ["armv7-linux-androideabi", "aarch64-linux-android"]

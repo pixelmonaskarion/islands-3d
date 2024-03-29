@@ -1,16 +1,17 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{collections::HashMap, time::{SystemTime, UNIX_EPOCH}};
 
 use bespoke_engine::{binding::{Descriptor, UniformBinding}, camera::Camera, model::{Render, ToRaw}, shader::Shader, texture::Texture, window::{WindowConfig, WindowHandler}};
 use bytemuck::{bytes_of, NoUninit};
 use cgmath::{Point3, Vector2, Vector3};
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
-use winit::{dpi::{PhysicalPosition, PhysicalSize}, event::KeyEvent, keyboard::{KeyCode, PhysicalKey::Code}};
+use winit::{dpi::{PhysicalPosition, PhysicalSize}, event::{KeyEvent, TouchPhase}, keyboard::{KeyCode, PhysicalKey::Code}};
 
 use crate::{height_map::HeightMap, instance::Instance, water::Water};
 
 pub struct Game {
     camera_binding: UniformBinding,
     camera: Camera,
+    screen_size: [f32; 2],
     time_binding: UniformBinding,
     start_time: u128,
     water_shader: Shader,
@@ -20,6 +21,8 @@ pub struct Game {
     water_normal2_image: Texture,
     height_map: HeightMap,
     ground_shader: Shader,
+    touch_positions: HashMap<u64, PhysicalPosition<f64>>,
+    moving_bc_finger: Option<u64>,
 }
 
 #[repr(C)]
@@ -74,9 +77,10 @@ impl ToRaw for Vertex {
 impl Game {
     pub fn new(device: &Device, queue: &Queue, format: TextureFormat, size: PhysicalSize<u32>) -> Self {
         let screen_size = [size.width as f32, size.height as f32];
-        let height_map = HeightMap::from_bytes(device, include_bytes!("height.png"), 2, 1.0, 250.0, true).unwrap();
+        let height_map = HeightMap::from_bytes_compute(device, queue, include_bytes!("height.png"), 2, 1.0, 250.0, true).unwrap();
         let camera = Camera {
-            eye: Point3::new(height_map.width as f32/2.0, height_map.height_multiplier/2.0, height_map.height as f32/2.0),
+            // eye: Point3::new(height_map.width as f32/2.0, height_map.height_multiplier/2.0, height_map.height as f32/2.0),
+            eye: Point3::new(0.0, 0.0, 0.0),
             aspect: screen_size[0] / screen_size[1],
             fovy: 70.0,
             znear: 0.1,
@@ -84,19 +88,20 @@ impl Game {
             ground: 0.0,
             sky: 0.0,
         };
-        let camera_binding = UniformBinding::new(device, "Camera", camera.build_view_projection_matrix());
-        let time_binding = UniformBinding::new(device, "Time", 0.0_f32);
+        let camera_binding = UniformBinding::new(device, "Camera", camera.build_view_projection_matrix(), None);
+        let time_binding = UniformBinding::new(device, "Time", 0.0_f32, None);
         let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
         let water_normal_image = Texture::from_bytes(device, queue, include_bytes!("water_normal.png"), "Water Normal Image", Some(wgpu::FilterMode::Linear)).unwrap();
         let water_normal2_image = Texture::from_bytes(device, queue, include_bytes!("water_normal2.png"), "Water Normal Image 2", Some(wgpu::FilterMode::Linear)).unwrap();
         let water_shader = Shader::new(include_str!("water.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout, &water_normal_image.layout, &water_normal2_image.layout], &[Vertex::desc(), Instance::desc()]);
         let water = Water::new(device, height_map.width.max(height_map.height) as f32, 0.1439215686*height_map.height_multiplier, 10.0);
-        let ground_shader = Shader::new(include_str!("ground.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout], &[crate::height_map::Vertex::desc()]);
+        let ground_shader = Shader::new(include_str!("ground.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout], &[crate::height_map::Vertex::desc()/*, Instance::desc()*/]);
         println!("height map has {} triangles", height_map.model.num_indices/3);
         
         Self {
             camera_binding,
             camera,
+            screen_size,
             time_binding,
             start_time,
             water_shader,
@@ -106,6 +111,8 @@ impl Game {
             water_normal2_image,
             height_map,
             ground_shader,
+            touch_positions: HashMap::new(),
+            moving_bc_finger: None,
         }
     }
 }
@@ -113,11 +120,12 @@ impl Game {
 impl WindowHandler for Game {
     fn resize(&mut self, _device: &Device, new_size: Vector2<u32>) {
         self.camera.aspect = new_size.x as f32 / new_size.y as f32;
+        self.screen_size = [new_size.x as f32, new_size.y as f32];
     }
 
     fn render<'a: 'b, 'b>(&'a mut self, device: &Device, render_pass: & mut RenderPass<'b>, delta: f64) {
         let speed = 0.02 * delta as f32;
-        if self.keys_down.contains(&KeyCode::KeyW) {
+        if self.keys_down.contains(&KeyCode::KeyW) || self.moving_bc_finger.is_some() {
             self.camera.eye += self.camera.get_walking_vec() * speed;
         }
         if self.keys_down.contains(&KeyCode::KeyS) {
@@ -146,12 +154,12 @@ impl WindowHandler for Game {
         
         self.height_map.model.render(render_pass);
         
-        render_pass.set_pipeline(&self.water_shader.pipeline);
+        // render_pass.set_pipeline(&self.water_shader.pipeline);
         
-        render_pass.set_bind_group(2, &self.water_normal_image.binding, &[]);
-        render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
+        // render_pass.set_bind_group(2, &self.water_normal_image.binding, &[]);
+        // render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
         
-        self.water.model.render(render_pass);
+        // self.water.model.render(render_pass);
     }
 
     fn config(&self) -> WindowConfig {
@@ -182,5 +190,30 @@ impl WindowHandler for Game {
         self.camera.ground += (delta.0 / 500.0) as f32;
         self.camera.sky -= (delta.1 / 500.0) as f32;
         self.camera.sky = self.camera.sky.clamp(std::f32::consts::PI*-0.499, std::f32::consts::PI*0.499);
+    }
+    
+    fn touch(&mut self, device: &Device, touch: &winit::event::Touch) {
+        match touch.phase {
+            TouchPhase::Moved => {
+                if let Some(last_position) = self.touch_positions.get(&touch.id) {
+                    let delta = (touch.location.x-last_position.x, touch.location.y-last_position.y);
+                    self.mouse_motion(device, delta);
+                    self.touch_positions.insert(touch.id, touch.location);
+                }
+            }
+            TouchPhase::Started => {
+                if touch.location.x <= self.screen_size[0] as f64 / 2.0 {
+                    self.touch_positions.insert(touch.id, touch.location);
+                } else {
+                    self.moving_bc_finger = Some(touch.id);
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.touch_positions.remove(&touch.id);
+                if self.moving_bc_finger == Some(touch.id) {
+                    self.moving_bc_finger = None;
+                }
+            }
+        }
     }
 }
