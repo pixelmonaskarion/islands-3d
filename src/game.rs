@@ -1,12 +1,12 @@
 use std::{collections::HashMap, time::{SystemTime, UNIX_EPOCH}};
 
-use bespoke_engine::{binding::{Descriptor, UniformBinding}, camera::Camera, model::{Render, ToRaw}, shader::Shader, texture::Texture, window::{WindowConfig, WindowHandler}};
+use bespoke_engine::{binding::{Descriptor, UniformBinding}, camera::Camera, model::{Render, ToRaw}, shader::{Shader, ShaderConfig}, texture::Texture, window::{WindowConfig, WindowHandler}};
 use bytemuck::{bytes_of, NoUninit};
-use cgmath::{Point3, Vector2, Vector3};
+use cgmath::{Quaternion, Rotation, Vector2, Vector3};
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
 use winit::{dpi::{PhysicalPosition, PhysicalSize}, event::{KeyEvent, TouchPhase}, keyboard::{KeyCode, PhysicalKey::Code}};
 
-use crate::{height_map::HeightMap, instance::Instance, water::Water};
+use crate::{billboard::Billboard, height_map::HeightMap, instance::Instance, water::Water};
 
 pub struct Game {
     camera_binding: UniformBinding,
@@ -23,6 +23,9 @@ pub struct Game {
     ground_shader: Shader,
     touch_positions: HashMap<u64, PhysicalPosition<f64>>,
     moving_bc_finger: Option<u64>,
+    billboard: Billboard,
+    baby_image: Texture,
+    billboard_shader: Shader,
 }
 
 #[repr(C)]
@@ -77,10 +80,10 @@ impl ToRaw for Vertex {
 impl Game {
     pub fn new(device: &Device, queue: &Queue, format: TextureFormat, size: PhysicalSize<u32>) -> Self {
         let screen_size = [size.width as f32, size.height as f32];
-        let height_map = HeightMap::from_bytes_compute(device, queue, include_bytes!("height.png"), 2, 1.0, 250.0, true).unwrap();
+        let height_map = HeightMap::from_bytes(device, include_bytes!("height.png"), 2, 1.0, 10, 250.0, true).unwrap();
         let camera = Camera {
-            // eye: Point3::new(height_map.width as f32/2.0, height_map.height_multiplier/2.0, height_map.height as f32/2.0),
-            eye: Point3::new(0.0, 0.0, 0.0),
+            eye: Vector3::new(height_map.width as f32/2.0, height_map.height_multiplier/2.0, height_map.height as f32/2.0),
+            // eye: Vector3::new(0.0, 0.0, 0.0),
             aspect: screen_size[0] / screen_size[1],
             fovy: 70.0,
             znear: 0.1,
@@ -93,11 +96,15 @@ impl Game {
         let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
         let water_normal_image = Texture::from_bytes(device, queue, include_bytes!("water_normal.png"), "Water Normal Image", Some(wgpu::FilterMode::Linear)).unwrap();
         let water_normal2_image = Texture::from_bytes(device, queue, include_bytes!("water_normal2.png"), "Water Normal Image 2", Some(wgpu::FilterMode::Linear)).unwrap();
-        let water_shader = Shader::new(include_str!("water.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout, &water_normal_image.layout, &water_normal2_image.layout], &[Vertex::desc(), Instance::desc()]);
+        let water_shader = Shader::new(include_str!("water.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout, &water_normal_image.layout, &water_normal2_image.layout], &[Vertex::desc(), Instance::desc()], None);
         let water = Water::new(device, height_map.width.max(height_map.height) as f32, 0.1439215686*height_map.height_multiplier, 10.0);
-        let ground_shader = Shader::new(include_str!("ground.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout], &[crate::height_map::Vertex::desc()/*, Instance::desc()*/]);
-        println!("height map has {} triangles", height_map.model.num_indices/3);
-        
+        let ground_shader = Shader::new(include_str!("ground.wgsl"), device, format, &[&camera_binding.layout, &time_binding.layout], &[crate::height_map::Vertex::desc(), Instance::desc()], None);
+        let baby_image = Texture::from_bytes(device, queue, include_bytes!("baby.png"), "Baby Sun Image", Some(wgpu::FilterMode::Linear)).unwrap();
+        let baby_dim = baby_image.normalized_dimensions();
+        let position = camera.eye+Vector3::new(1.0_f32, 0.0, 0.0);
+        let rotation = Quaternion::look_at(camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
+        let billboard = Billboard::new(baby_dim.0, baby_dim.1, 1.0, position, rotation, device);
+        let billboard_shader = Shader::new(include_str!("billboard.wgsl"), device, format, &[&camera_binding.layout, &baby_image.layout], &[Vertex::desc(), Instance::desc()], Some(ShaderConfig {background: Some(false)}));
         Self {
             camera_binding,
             camera,
@@ -113,6 +120,9 @@ impl Game {
             ground_shader,
             touch_positions: HashMap::new(),
             moving_bc_finger: None,
+            billboard,
+            baby_image,
+            billboard_shader,
         }
     }
 }
@@ -124,7 +134,7 @@ impl WindowHandler for Game {
     }
 
     fn render<'a: 'b, 'b>(&'a mut self, device: &Device, render_pass: & mut RenderPass<'b>, delta: f64) {
-        let speed = 0.02 * delta as f32;
+        let speed = 0.01 * delta as f32;
         if self.keys_down.contains(&KeyCode::KeyW) || self.moving_bc_finger.is_some() {
             self.camera.eye += self.camera.get_walking_vec() * speed;
         }
@@ -143,23 +153,33 @@ impl WindowHandler for Game {
         if self.keys_down.contains(&KeyCode::ShiftLeft) {
             self.camera.eye -= Vector3::unit_y() * speed;
         }
-        // self.camera.eye.y = self.height_map.get_height_at(self.camera.eye.x, self.camera.eye.z)+2.0;
+        self.camera.eye.y = self.height_map.get_height_at(self.camera.eye.x, self.camera.eye.z)+1.0;
         self.camera_binding.set_data(device, self.camera.build_view_projection_matrix());
-        self.time_binding.set_data(device, (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()-self.start_time) as f32 / 1000.0);
+        let time = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()-self.start_time) as f32 / 1000.0;
+        self.time_binding.set_data(device, time);
+        let position = self.camera.eye+Vector3::new(time.cos(), time.sin(), 0.0);
+        let rotation = Quaternion::look_at(self.camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
+        self.billboard.set_both(position, rotation, device);
+
+        render_pass.set_pipeline(&self.billboard_shader.pipeline);
+        
+        render_pass.set_bind_group(0, &self.camera_binding.binding, &[]);
+        render_pass.set_bind_group(1, &self.baby_image.binding, &[]);
+
+        self.billboard.render(render_pass);
 
         render_pass.set_pipeline(&self.ground_shader.pipeline);
         
-        render_pass.set_bind_group(0, &self.camera_binding.binding, &[]);
         render_pass.set_bind_group(1, &self.time_binding.binding, &[]);
         
-        self.height_map.model.render(render_pass);
+        self.height_map.render(render_pass);
         
-        // render_pass.set_pipeline(&self.water_shader.pipeline);
+        render_pass.set_pipeline(&self.water_shader.pipeline);
         
-        // render_pass.set_bind_group(2, &self.water_normal_image.binding, &[]);
-        // render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
+        render_pass.set_bind_group(2, &self.water_normal_image.binding, &[]);
+        render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
         
-        // self.water.model.render(render_pass);
+        self.water.model.render(render_pass);
     }
 
     fn config(&self) -> WindowConfig {

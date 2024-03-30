@@ -7,7 +7,7 @@ pub struct Instance {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug)]
 struct InstanceRaw {
     model: [[f32; 4]; 4],
 }
@@ -23,7 +23,7 @@ impl Descriptor for Instance {
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         use std::mem;
         wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Instance>() as wgpu::BufferAddress,
+            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
             // We need to switch from using a step mode of Vertex to Instance
             // This means that our shaders will only change to use the next
             // instance when the shader starts processing a new instance

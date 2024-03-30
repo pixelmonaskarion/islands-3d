@@ -1,7 +1,7 @@
-use bespoke_engine::{binding::{Descriptor, UniformBinding}, model::{Model, ToRaw}, texture::Texture};
+use bespoke_engine::{binding::{Descriptor, UniformBinding}, model::{Model, Render, ToRaw}, texture::Texture};
 use bespoke_engine::compute::ComputeShader;
 use bytemuck::{bytes_of, NoUninit};
-use cgmath::{InnerSpace, Quaternion, Rotation3, Vector3};
+use cgmath::{Deg, InnerSpace, Quaternion, Rotation3, Vector3};
 use image::{DynamicImage, GenericImageView, ImageError};
 use wgpu::{Device, Queue};
 
@@ -55,7 +55,7 @@ impl ToRaw for Vertex {
 
 pub struct HeightMap {
     pub image: DynamicImage,
-    pub model: Model,
+    pub models: Vec<((u32, u32), Model)>,
     pub width: u32,
     pub height: u32,
     pub size: f32,
@@ -63,60 +63,78 @@ pub struct HeightMap {
 }
 
 impl HeightMap {
-    pub fn from_bytes(device: &Device, image_bytes: &[u8], res: u32, size: f32, height_multiplier: f32, gen_normals: bool) -> Result<Self, ImageError> {
+    pub fn from_bytes(device: &Device, image_bytes: &[u8], res: u32, size: f32, chunks: u32, height_multiplier: f32, gen_normals: bool) -> Result<Self, ImageError> {
         let image = image::load_from_memory(image_bytes)?.grayscale();
         let width = image.width()/res;
         let height = image.height()/res;
-        let mut vertices = vec![];
-        let mut indices = vec![];
-        for x in 0..width {
-            for y in 0..height {
-                let v_height = image.get_pixel(x*res, y*res).0[0] as f32 / 255.0 * height_multiplier;
-                let mut color = [17.0/255.0,124.0/255.0,19.0/255.0];
-                if v_height > height_multiplier*0.7 {
-                    color = [0.9, 0.9, 0.9];
+        let mut models = Vec::new();
+        for cx in 0..chunks {
+            for cy in 0..chunks {
+                let mut vertices = vec![];
+                let mut indices = vec![];
+                let extra_x = if cx == chunks-1 {
+                    0
+                } else {
+                    1
+                };
+                let extra_y = if cy == chunks-1 {
+                    0
+                } else {
+                    1
+                };
+                for x in 0..width/chunks+extra_x {
+                    for y in 0..height/chunks+extra_y {
+                        let px = x + (width/chunks)*cx;
+                        let py = y + (height/chunks)*cy;
+                        let v_height = image.get_pixel(px*res, py*res).0[0] as f32 / 255.0 * height_multiplier;
+                        let mut color = [17.0/255.0,124.0/255.0,19.0/255.0];
+                        if v_height > height_multiplier*0.7 {
+                            color = [0.9, 0.9, 0.9];
+                        }
+                        if v_height <= 0.1439215686*height_multiplier {
+                            color = [0.3, 0.3, 0.3];
+                        }
+                        vertices.push(Vertex { position: [(px*res) as f32 * size, v_height, (py*res) as f32 * size], color, normal: [0.0, 1.0, 0.0] });
+                        if x < (width/chunks+extra_x)-1 && y < (height/chunks+extra_y)-1 {
+                            let i = x * (height/chunks+extra_y) + y;
+                            indices.append(&mut [i, i+1, i+(height/chunks+extra_y)+1, i, i+(height/chunks+extra_y)+1, i+(height/chunks+extra_y)].to_vec());
+                        }
+                    }
                 }
-                if v_height <= 0.1439215686*height_multiplier {
-                    color = [0.3, 0.3, 0.3];
+                if gen_normals {
+                    for i in 0..indices.len()/3 {
+                        let v1 = indices[i*3] as usize;
+                        let v2 = indices[i*3+1] as usize;
+                        let v3 = indices[i*3+2] as usize;
+        
+                        let u = vertices[v2].pos()-vertices[v1].pos();
+                        let v = vertices[v3].pos()-vertices[v1].pos();
+        
+                        let mut normal = Vector3::new(0.0, 0.0, 0.0);
+                        normal.x = u.y*v.z - u.z*v.y;
+                        normal.y = u.z*v.x - u.x*v.z;
+                        normal.z = u.x*v.y - u.y*v.x;
+                        normal = normal.normalize();
+                        vertices[v1].normal = normal.into();
+                        vertices[v2].normal = normal.into();
+                        vertices[v3].normal = normal.into();
+                        if normal.y < 0.5 {
+                            let dirt_color = [165.0/255.0,42.0/255.0,42.0/255.0];
+                            if vertices[v1].color != [0.9, 0.9, 0.9] { vertices[v1].color = dirt_color; } 
+                            if vertices[v2].color != [0.9, 0.9, 0.9] { vertices[v2].color = dirt_color; } 
+                            if vertices[v3].color != [0.9, 0.9, 0.9] { vertices[v3].color = dirt_color; } 
+                        }
+                    }
                 }
-                vertices.push(Vertex { position: [(x*res) as f32 * size, v_height, (y*res) as f32 * size], color, normal: [0.0, 0.0, 0.0] });
-                if x < width-1 && y < height-1 {
-                    let i = x * height + y;
-                    indices.append(&mut [i, i+1, i+height+1, i, i+height+1, i+height].to_vec());
-                }
+                let model = Model::new_instances(vertices, &indices, vec![
+                    Instance {position: Vector3::new(0.0, 0.0, 0.0), rotation: Quaternion::from_axis_angle(Vector3::unit_z(), Deg(0.0))},
+                ], device);
+                models.push(((cx, cy), model));
             }
         }
-        if gen_normals {
-            for i in 0..indices.len()/3 {
-                let v1 = indices[i*3] as usize;
-                let v2 = indices[i*3+1] as usize;
-                let v3 = indices[i*3+2] as usize;
-
-                let u = vertices[v2].pos()-vertices[v1].pos();
-                let v = vertices[v3].pos()-vertices[v1].pos();
-
-                let mut normal = Vector3::new(0.0, 0.0, 0.0);
-                normal.x = u.y*v.z - u.z*v.y;
-                normal.y = u.z*v.x - u.x*v.z;
-                normal.z = u.x*v.y - u.y*v.x;
-                normal = normal.normalize();
-                vertices[v1].normal = normal.into();
-                vertices[v2].normal = normal.into();
-                vertices[v3].normal = normal.into();
-                if normal.y < 0.5 {
-                    let dirt_color = [165.0/255.0,42.0/255.0,42.0/255.0];
-                    if vertices[v1].color != [0.9, 0.9, 0.9] { vertices[v1].color = dirt_color; } 
-                    if vertices[v2].color != [0.9, 0.9, 0.9] { vertices[v2].color = dirt_color; } 
-                    if vertices[v3].color != [0.9, 0.9, 0.9] { vertices[v3].color = dirt_color; } 
-                }
-            }
-        }
-        let model = Model::new_instances(vertices, &indices, vec![
-            Instance { position: Vector3::new(0.0, 0.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)) },
-            // Instance { position: Vector3::new(0.0, 10.0, 0.0), rotation: Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)) },
-        ], device);
+        
         Ok(Self {
-            model,
+            models,
             width: image.width(),
             height: image.height(),
             size,
@@ -155,7 +173,7 @@ impl HeightMap {
         compute_shader.run(&[/*image_texture.binding, */image_height_binding.binding, res_binding.binding, size_binding.binding, height_multiplier_binding.binding, output_binding.binding], [width, height, 1], device, queue);
         let model = Model::new_vertex_buffer(output_binding.buffer, width*height, &indices, device);
         Ok(Self {
-            model,
+            models: vec![((0, 0), model)],
             width: image.width(),
             height: image.height(),
             size,
@@ -179,5 +197,13 @@ impl HeightMap {
         let heightx2 = height2+(height3-height2)*x_fract;
         return heightx1 + (heightx2-heightx1)*y_fract;
         
+    }
+}
+
+impl Render for HeightMap {
+    fn render<'a: 'b, 'b>(&'a self, render_pass: &mut wgpu::RenderPass<'b>) {
+        for (_, model) in &self.models {
+            model.render(render_pass);
+        }
     }
 }
