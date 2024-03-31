@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::{SystemTime, UNIX_EPOCH}};
 
-use bespoke_engine::{binding::{Descriptor, UniformBinding}, camera::Camera, model::{Render, ToRaw}, shader::{Shader, ShaderConfig}, texture::Texture, window::{WindowConfig, WindowHandler}};
+use bespoke_engine::{binding::{Descriptor, UniformBinding}, camera::Camera, model::{Model, Render, ToRaw}, shader::{Shader, ShaderConfig}, texture::Texture, window::{WindowConfig, WindowHandler}};
 use bytemuck::{bytes_of, NoUninit};
 use cgmath::{Quaternion, Rotation, Vector2, Vector3};
 use wgpu::{Device, Queue, RenderPass, TextureFormat};
@@ -23,9 +23,10 @@ pub struct Game {
     ground_shader: Shader,
     touch_positions: HashMap<u64, PhysicalPosition<f64>>,
     moving_bc_finger: Option<u64>,
-    billboard: Billboard,
+    baby_billboard: Billboard,
     baby_image: Texture,
-    billboard_shader: Shader,
+    sun_shader: Shader,
+    post_processing_shader: Shader,
 }
 
 #[repr(C)]
@@ -103,8 +104,9 @@ impl Game {
         let baby_dim = baby_image.normalized_dimensions();
         let position = camera.eye+Vector3::new(1.0_f32, 0.0, 0.0);
         let rotation = Quaternion::look_at(camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
-        let billboard = Billboard::new(baby_dim.0, baby_dim.1, 1.0, position, rotation, device);
-        let billboard_shader = Shader::new(include_str!("billboard.wgsl"), device, format, &[&camera_binding.layout, &baby_image.layout], &[Vertex::desc(), Instance::desc()], Some(ShaderConfig {background: Some(false)}));
+        let baby_billboard = Billboard::new(baby_dim.0, baby_dim.1, 1.0, position, rotation, device);
+        let sun_shader = Shader::new(include_str!("billboard.wgsl"), device, format, &[&camera_binding.layout, &baby_image.layout], &[Vertex::desc(), Instance::desc()], Some(ShaderConfig {background: Some(false)}));
+        let post_processing_shader = Shader::new_post_process(include_str!("post_process.wgsl"), device, format, &[&Texture::layout(device, None, None), &time_binding.layout]);
         Self {
             camera_binding,
             camera,
@@ -120,9 +122,10 @@ impl Game {
             ground_shader,
             touch_positions: HashMap::new(),
             moving_bc_finger: None,
-            billboard,
+            baby_billboard,
             baby_image,
-            billboard_shader,
+            sun_shader,
+            post_processing_shader,
         }
     }
 }
@@ -159,14 +162,14 @@ impl WindowHandler for Game {
         self.time_binding.set_data(device, time);
         let position = self.camera.eye+Vector3::new(time.cos(), time.sin(), 0.0);
         let rotation = Quaternion::look_at(self.camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
-        self.billboard.set_both(position, rotation, device);
+        self.baby_billboard.set_both(position, rotation, device);
 
-        render_pass.set_pipeline(&self.billboard_shader.pipeline);
+        render_pass.set_pipeline(&self.sun_shader.pipeline);
         
         render_pass.set_bind_group(0, &self.camera_binding.binding, &[]);
         render_pass.set_bind_group(1, &self.baby_image.binding, &[]);
 
-        self.billboard.render(render_pass);
+        self.baby_billboard.render(render_pass);
 
         render_pass.set_pipeline(&self.ground_shader.pipeline);
         
@@ -180,6 +183,11 @@ impl WindowHandler for Game {
         render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
         
         self.water.model.render(render_pass);
+
+        // render_pass.set_pipeline(&self.billboard_shader.pipeline);
+        // render_pass.set_bind_group(1, &surface_texture.binding, &[]);
+
+        // self.test_billboard.render(render_pass);
     }
 
     fn config(&self) -> WindowConfig {
@@ -235,5 +243,13 @@ impl WindowHandler for Game {
                 }
             }
         }
+    }
+    
+    fn post_process_render<'a: 'b, 'c: 'b, 'b>(&'a mut self, _device: &Device, render_pass: & mut RenderPass<'b>, screen_model: &'c Model, surface_texture: &'c Texture) {
+        render_pass.set_pipeline(&self.post_processing_shader.pipeline);
+        render_pass.set_bind_group(0, &surface_texture.binding, &[]);
+        render_pass.set_bind_group(1, &self.time_binding.binding, &[]);
+
+        screen_model.render(render_pass);
     }
 }
