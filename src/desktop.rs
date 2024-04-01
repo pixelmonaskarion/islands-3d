@@ -7,6 +7,7 @@ mod height_map;
 mod instance;
 mod runner;
 mod billboard;
+include!(concat!(env!("OUT_DIR"), "/resources.rs"));
 
 #[tokio::main]
 async fn main() {

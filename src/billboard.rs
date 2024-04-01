@@ -51,4 +51,7 @@ impl Render for Billboard {
     fn render<'a: 'b, 'b>(&'a self, render_pass: &mut wgpu::RenderPass<'b>) {
         self.model.render(render_pass);
     }
+    fn render_instances<'a: 'b, 'c: 'b, 'b>(&'a self, render_pass: &mut wgpu::RenderPass<'b>, instances: &'c wgpu::Buffer, range: std::ops::Range<u32>) {
+        self.model.render_instances(render_pass, instances, range);
+    }
 }

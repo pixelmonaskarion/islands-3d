@@ -27,6 +27,7 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let screen = textureSample(t_screen, s_screen, in.tex_coords);
-    return vec4f(abs(sin(time)-screen.x), abs(cos(time)-screen.y), screen.zw);
+    // let screen = textureSample(t_screen, s_screen, in.tex_coords);
+    // return vec4f(abs(sin(time)-screen.x), abs(cos(time)-screen.y), screen.zw);
+    return textureSample(t_screen, s_screen, in.tex_coords);
 }

@@ -206,4 +206,9 @@ impl Render for HeightMap {
             model.render(render_pass);
         }
     }
+    fn render_instances<'a: 'b, 'c: 'b, 'b>(&'a self, render_pass: &mut wgpu::RenderPass<'b>, instances: &'c wgpu::Buffer, range: std::ops::Range<u32>) {
+        for (_, model) in &self.models {
+            model.render_instances(render_pass, instances, range.clone());
+        }
+    }
 }
