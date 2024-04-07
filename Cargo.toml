@@ -13,6 +13,7 @@ env_logger = "0.11.2"
 image = "0.25.0"
 tokio = { version = "1.36.0", features = ["full"] }
 wgpu = "0.19.1"
+wgpu_text = "0.8.7"
 bespoke-engine = { path = "../bespoke-engine" }
 log = "0.4.21"
 load_file = "1.0.1"

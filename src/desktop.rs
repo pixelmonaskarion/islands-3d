@@ -7,6 +7,8 @@ mod height_map;
 mod instance;
 mod runner;
 mod billboard;
+mod instance_compute;
+mod banana_instance;
 include!(concat!(env!("OUT_DIR"), "/resources.rs"));
 
 #[tokio::main]

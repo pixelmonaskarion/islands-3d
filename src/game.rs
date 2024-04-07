@@ -2,11 +2,12 @@ use std::{collections::HashMap, path::Path, time::{SystemTime, UNIX_EPOCH}};
 
 use bespoke_engine::{binding::{Descriptor, UniformBinding}, camera::Camera, mesh::MeshModel, model::{Model, Render, ToRaw}, shader::{Shader, ShaderConfig}, texture::Texture, window::{WindowConfig, WindowHandler}};
 use bytemuck::{bytes_of, NoUninit};
-use cgmath::{Quaternion, Rotation, Vector2, Vector3};
-use wgpu::{Device, Queue, RenderPass, TextureFormat};
+use cgmath::{MetricSpace, Quaternion, Rotation, Vector2, Vector3};
+use wgpu::{Buffer, Device, Queue, RenderPass, TextureFormat};
+use wgpu_text::{glyph_brush::{ab_glyph::FontRef, OwnedSection, OwnedText}, BrushBuilder, TextBrush};
 use winit::{dpi::{PhysicalPosition, PhysicalSize}, event::{KeyEvent, TouchPhase}, keyboard::{KeyCode, PhysicalKey::Code}};
 
-use crate::{billboard::Billboard, height_map::HeightMap, instance::Instance, load_resource, load_resource_string, water::Water};
+use crate::{banana_instance::BananaInstance, billboard::Billboard, height_map::HeightMap, instance::Instance, instance_compute::BananaInstances, load_resource, load_resource_string, water::Water};
 
 pub struct Game {
     camera_binding: UniformBinding,
@@ -28,7 +29,12 @@ pub struct Game {
     sun_shader: Shader,
     post_processing_shader: Shader,
     model_shader: Shader,
-    cube_model: MeshModel,
+    banana_model: MeshModel,
+    banana_instances_gen: BananaInstances,
+    banana_instances: Buffer,
+    height_map_texture: Texture,
+    text_brush: TextBrush<FontRef<'static>>,
+    text_section: OwnedSection,
 }
 
 #[repr(C)]
@@ -83,10 +89,13 @@ impl ToRaw for Vertex {
 impl Game {
     pub fn new(device: &Device, queue: &Queue, format: TextureFormat, size: PhysicalSize<u32>) -> Self {
         let screen_size = [size.width as f32, size.height as f32];
-        let height_map = HeightMap::from_bytes(device, &load_resource("res/height.png").unwrap(), 2, 1.0, 10, 250.0, true).unwrap();
+        let height_image_bytes = load_resource("res/height.png").unwrap();
+        let height_map_texture = Texture::from_bytes(device, queue, &height_image_bytes, "Height Map Texture", None).unwrap();
+        // let height_map = HeightMap::from_bytes_compute(device, queue, &load_resource("res/height.png").unwrap(), &height_map_texture, 2, 1.0, 250.0, true).unwrap();
+        let height_map = HeightMap::make_data(&height_image_bytes, 2, 1.0, 10, 250.0, true).unwrap();
         let camera = Camera {
-            // eye: Vector3::new(height_map.width as f32/2.0, height_map.height_multiplier/2.0, height_map.height as f32/2.0),
-            eye: Vector3::new(0.0, 0.0, 0.0),
+            eye: Vector3::new(height_map.width as f32/2.0, height_map.height_multiplier/2.0, height_map.height as f32/2.0),
+            // eye: Vector3::new(0.0, 0.0, 0.0),
             aspect: screen_size[0] / screen_size[1],
             fovy: 70.0,
             znear: 0.1,
@@ -108,10 +117,16 @@ impl Game {
         let rotation = Quaternion::look_at(camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
         let baby_billboard = Billboard::new(baby_dim.0, baby_dim.1, 1.0, position, rotation, device);
         let sun_shader = Shader::new(include_str!("billboard.wgsl"), device, format, &[&camera_binding.layout, &baby_image.layout], &[Vertex::desc(), Instance::desc()], Some(ShaderConfig {background: Some(false)}));
-        let post_processing_shader = Shader::new_post_process(include_str!("post_process.wgsl"), device, format, &[&Texture::layout(device, None, None), &time_binding.layout]);
+        let post_processing_shader = Shader::new_post_process(include_str!("post_process.wgsl"), device, format, &[&Texture::layout(device, None, None), &Texture::depth_layout(device, None, None), &time_binding.layout]);
         let model_texture_layout = Texture::layout(device, None, Some("Cube Material".into()));
-        let model_shader = Shader::new(include_str!("model.wgsl"), device, format, &[&Texture::layout(device, None, None), &camera_binding.layout], &[Vertex::desc()], None);
-        let cube_model = MeshModel::load_model(Some("Cube".to_string()), Path::new("res/Banana_OBJ/Banana.obj"), load_resource_string, load_resource, device, queue, &model_texture_layout).unwrap();
+        let model_shader = Shader::new(include_str!("model.wgsl"), device, format, &[&Texture::layout(device, None, None), &camera_binding.layout], &[Vertex::desc(), BananaInstance::desc()], None);
+        let banana_model = MeshModel::load_model(Some("Cube".to_string()), Path::new("res/Banana_OBJ/Banana.obj"), load_resource_string, load_resource, device, queue, &model_texture_layout).unwrap();
+        let banana_instances_gen = BananaInstances::new([100, 100], include_str!("banana_instances.wgsl"), &time_binding.layout, &height_map_texture.layout, device);
+        let banana_instances = banana_instances_gen.create_bananas(&time_binding.binding, &height_map_texture.binding, device, queue);
+        let text_brush = BrushBuilder::using_font_bytes(load_resource("res/ComicSansMS.ttf").unwrap()).unwrap()
+            .build(&device, size.width, size.height, format);
+        let text_section = OwnedSection::default().add_text(OwnedText::new(format!("0")).with_scale(200.0)
+            .with_color([0.0, 0.7490196078, 1.0, 1.0]));
         Self {
             camera_binding,
             camera,
@@ -132,69 +147,89 @@ impl Game {
             sun_shader,
             post_processing_shader,
             model_shader,
-            cube_model,
+            banana_model,
+            banana_instances_gen,
+            banana_instances,
+            height_map_texture,
+            text_brush,
+            text_section,
         }
     }
 }
 
 impl WindowHandler for Game {
-    fn resize(&mut self, _device: &Device, new_size: Vector2<u32>) {
+    fn resize(&mut self, _device: &Device, queue: &Queue, new_size: Vector2<u32>) {
         self.camera.aspect = new_size.x as f32 / new_size.y as f32;
         self.screen_size = [new_size.x as f32, new_size.y as f32];
+        self.text_brush.resize_view(new_size.x as f32, new_size.y as f32, queue);
     }
 
-    fn render<'a: 'b, 'b>(&'a mut self, device: &Device, render_pass: & mut RenderPass<'b>, delta: f64) {
-        let speed = 0.01 * delta as f32;
-        if self.keys_down.contains(&KeyCode::KeyW) || self.moving_bc_finger.is_some() {
-            self.camera.eye += self.camera.get_walking_vec() * speed;
-        }
-        if self.keys_down.contains(&KeyCode::KeyS) {
-            self.camera.eye -= self.camera.get_walking_vec() * speed;
-        }
-        if self.keys_down.contains(&KeyCode::KeyA) {
-            self.camera.eye -= self.camera.get_right_vec() * speed;
-        }
-        if self.keys_down.contains(&KeyCode::KeyD) {
-            self.camera.eye += self.camera.get_right_vec() * speed;
-        }
-        if self.keys_down.contains(&KeyCode::Space) {
-            self.camera.eye += Vector3::unit_y() * speed;
-        }
-        if self.keys_down.contains(&KeyCode::ShiftLeft) {
-            self.camera.eye -= Vector3::unit_y() * speed;
-        }
-        // self.camera.eye.y = self.height_map.get_height_at(self.camera.eye.x, self.camera.eye.z)+1.0;
-        self.camera_binding.set_data(device, self.camera.build_view_projection_matrix());
-        let time = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()-self.start_time) as f32 / 1000.0;
-        self.time_binding.set_data(device, time);
-        let position = self.camera.eye+Vector3::new(time.cos(), time.sin(), 0.0);
-        let rotation = Quaternion::look_at(self.camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
-        self.baby_billboard.set_both(position, rotation, device);
+    fn render<'a: 'b, 'b>(&'a mut self, device: &Device, queue: &Queue, render_pass: & mut RenderPass<'b>, delta: f64) {
+        if self.height_map.models.is_some() {
+            let speed = 1.0 * delta as f32;
+            if self.keys_down.contains(&KeyCode::KeyW) || self.moving_bc_finger.is_some() {
+                self.camera.eye += self.camera.get_walking_vec() * speed;
+            }
+            if self.keys_down.contains(&KeyCode::KeyS) {
+                self.camera.eye -= self.camera.get_walking_vec() * speed;
+            }
+            if self.keys_down.contains(&KeyCode::KeyA) {
+                self.camera.eye -= self.camera.get_right_vec() * speed;
+            }
+            if self.keys_down.contains(&KeyCode::KeyD) {
+                self.camera.eye += self.camera.get_right_vec() * speed;
+            }
+            if self.keys_down.contains(&KeyCode::Space) {
+                self.camera.eye += Vector3::unit_y() * speed;
+            }
+            if self.keys_down.contains(&KeyCode::ShiftLeft) {
+                self.camera.eye -= Vector3::unit_y() * speed;
+            }
+            self.camera.eye.y = self.height_map.get_height_at(self.camera.eye.x, self.camera.eye.z)+2.0;
+            let banana_coords = ((self.camera.eye.x/(30.96)).round() as u32, (self.camera.eye.z/(30.96)).round() as u32);
+            if !self.banana_instances_gen.collected.contains(&banana_coords) {
+                let dist = self.camera.eye.distance(Vector3::new(banana_coords.0 as f32 * 30.96, self.camera.eye.y, banana_coords.1 as f32 *30.96));
+                if dist < 5.0 {
+                    self.banana_instances_gen.collect(banana_coords, device);
+                    self.text_section.text = vec![OwnedText::new(self.banana_instances_gen.collected.len().to_string()).with_scale(200.0)
+                    .with_color([0.0, 0.7490196078, 1.0, 1.0])];
+                }
+            }
+            self.camera_binding.set_data(device, self.camera.build_view_projection_matrix());
+            let time = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()-self.start_time) as f32 / 1000.0;
+            self.time_binding.set_data(device, time);
+            let position = self.camera.eye+Vector3::new(time.cos(), time.sin(), 0.0);
+            let rotation = Quaternion::look_at(self.camera.eye-position, Vector3::new(0.0, 1.0, 0.0));
+            self.baby_billboard.set_both(position, rotation, device);
 
-        render_pass.set_pipeline(&self.sun_shader.pipeline);
-        
-        render_pass.set_bind_group(0, &self.camera_binding.binding, &[]);
-        render_pass.set_bind_group(1, &self.baby_image.binding, &[]);
+            render_pass.set_pipeline(&self.sun_shader.pipeline);
+            
+            render_pass.set_bind_group(0, &self.camera_binding.binding, &[]);
+            render_pass.set_bind_group(1, &self.baby_image.binding, &[]);
 
-        self.baby_billboard.render(render_pass);
+            self.baby_billboard.render(render_pass);
 
-        render_pass.set_pipeline(&self.ground_shader.pipeline);
-        
-        render_pass.set_bind_group(1, &self.time_binding.binding, &[]);
-        
-        self.height_map.render(render_pass);
-        
-        render_pass.set_pipeline(&self.water_shader.pipeline);
-        
-        render_pass.set_bind_group(2, &self.water_normal_image.binding, &[]);
-        render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
-        
-        self.water.model.render(render_pass);
+            render_pass.set_pipeline(&self.ground_shader.pipeline);
+            
+            render_pass.set_bind_group(1, &self.time_binding.binding, &[]);
+            
+            self.height_map.render(render_pass);
 
-        render_pass.set_pipeline(&self.model_shader.pipeline);
-        render_pass.set_bind_group(1, &self.camera_binding.binding, &[]);
+            render_pass.set_pipeline(&self.model_shader.pipeline);
+            render_pass.set_bind_group(1, &self.camera_binding.binding, &[]);
+            self.banana_instances = self.banana_instances_gen.create_bananas(&self.time_binding.binding, &self.height_map_texture.binding, device, queue);
+            self.banana_model.render_instances(render_pass, &self.banana_instances, 0..(self.banana_instances_gen.num_bananas[0]*self.banana_instances_gen.num_bananas[1]) as u32);
 
-        self.cube_model.render(render_pass);
+            render_pass.set_pipeline(&self.water_shader.pipeline);
+            render_pass.set_bind_group(0, &self.camera_binding.binding, &[]);
+            render_pass.set_bind_group(1, &self.time_binding.binding, &[]);
+            render_pass.set_bind_group(2, &self.water_normal_image.binding, &[]);
+            render_pass.set_bind_group(3, &self.water_normal2_image.binding, &[]);
+            
+            self.water.model.render(render_pass);
+        } else {
+            self.height_map.create_models(device);
+        }
     }
 
     fn config(&self) -> WindowConfig {
@@ -252,11 +287,14 @@ impl WindowHandler for Game {
         }
     }
     
-    fn post_process_render<'a: 'b, 'c: 'b, 'b>(&'a mut self, _device: &Device, render_pass: & mut RenderPass<'b>, screen_model: &'c Model, surface_texture: &'c Texture) {
+    fn post_process_render<'a: 'b, 'c: 'b, 'b>(&'a mut self, device: &Device, queue: &Queue, render_pass: & mut RenderPass<'b>, screen_model: &'c Model, surface_texture: &'c Texture, depth_texture: &'c Texture) {
         render_pass.set_pipeline(&self.post_processing_shader.pipeline);
         render_pass.set_bind_group(0, &surface_texture.binding, &[]);
-        render_pass.set_bind_group(1, &self.time_binding.binding, &[]);
+        render_pass.set_bind_group(1, &depth_texture.binding, &[]);
+        render_pass.set_bind_group(2, &self.time_binding.binding, &[]);
 
         screen_model.render(render_pass);
+        self.text_brush.queue(device, queue, vec![&self.text_section]).unwrap();
+        self.text_brush.draw(render_pass);
     }
 }
