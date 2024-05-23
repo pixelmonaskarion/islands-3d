@@ -10,7 +10,7 @@ pub struct BananaInstances {
     pub num_bananas: [usize; 2],
     dst_layout: BindGroupLayout,
     shader: ComputeShader,
-    bananas_height_binding: UniformBinding,
+    bananas_height_binding: UniformBinding<u32>,
 }
 
 impl BananaInstances {
@@ -50,7 +50,7 @@ impl BananaInstances {
             contents: bytemuck::cast_slice::<u32, _>(&vec![0; num_bananas[0] * num_bananas[1]]),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let bananas_height_binding = UniformBinding::new(device, "Bananas Height", num_bananas[1], None);
+        let bananas_height_binding = UniformBinding::new(device, "Bananas Height", num_bananas[1] as u32, None);
         let compute_shader = ComputeShader::new(shader_source, &[&dst_layout, time_layout, image_layout, &bananas_height_binding.layout], device);
         Self {
             blank_instances,

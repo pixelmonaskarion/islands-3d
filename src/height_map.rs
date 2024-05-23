@@ -1,12 +1,10 @@
 use std::sync::mpsc::{channel, Receiver};
 
-use bespoke_engine::{binding::Descriptor, compute::ComputeShader, model::{Model, Render, ToRaw}, texture::Texture};
+use bespoke_engine::{binding::Descriptor, compute::ComputeShader, instance::Instance, model::{Model, Render, ToRaw}, texture::Texture};
 use bytemuck::{bytes_of, NoUninit};
 use cgmath::{Deg, InnerSpace, Quaternion, Rotation3, Vector3};
 use image::{DynamicImage, GenericImageView, ImageError};
 use wgpu::{util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, Device, Queue};
-
-use crate::instance::Instance;
 
 #[repr(C)]
 #[derive(NoUninit, Copy, Clone)]
@@ -14,6 +12,7 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
     pub normal: [f32; 3],
+    // pub padding: [f32; 3],
 }
 
 impl Vertex {
@@ -41,6 +40,11 @@ impl Descriptor for Vertex {
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
                     shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],
@@ -129,6 +133,7 @@ impl HeightMap {
                     }
                 }
                 let model = Model::new_instances(vertices, &indices, vec![
+                    // Instance {rotation: Quaternion::zero(), position: vec3(x, y, z)},
                     Instance::default(),
                 ], device);
                 models.push(((cx, cy), model));
@@ -181,7 +186,7 @@ impl HeightMap {
                             if v_height <= 0.1439215686*height_multiplier {
                                 color = [0.3, 0.3, 0.3];
                             }
-                            vertices.push(Vertex { position: [(px*res) as f32 * size, v_height, (py*res) as f32 * size], color, normal: [0.0, 1.0, 0.0] });
+                            vertices.push(Vertex { position: [(px*res) as f32 * size, v_height, (py*res) as f32 * size], color, normal: [0.0, 1.0, 0.0]});
                             if x < (width/chunks+extra_x)-1 && y < (height/chunks+extra_y)-1 {
                                 let i = x * (height/chunks+extra_y) + y;
                                 indices.append(&mut [i, i+1, i+(height/chunks+extra_y)+1, i, i+(height/chunks+extra_y)+1, i+(height/chunks+extra_y)].to_vec());
@@ -231,23 +236,33 @@ impl HeightMap {
 
     pub fn from_bytes_compute(device: &Device, queue: &Queue, image_bytes: &[u8], image_texture: &Texture, res: u32, size: f32, height_multiplier: f32, gen_normals: bool) -> Result<Self, ImageError> {
         let image = image::load_from_memory(image_bytes)?.grayscale();
-        let width = image_texture.texture.width()/res;
-        let height = image_texture.texture.height()/res;
+        // let width = image_texture.texture.width()/res;
+        // let height = image_texture.texture.height()/res;
+        let width = 100;
+        let height = 100;
         println!("HEIGHT: {height}");
         let mut indices = vec![];
+        // let mut vertices = vec![];
         for x in 0..width {
             for y in 0..height {
-                if x < width-1 && y < height-1 {
+                // vertices.push(Vertex {color: [1.0, 1.0, 1.0], normal: [0.0, 1.0, 0.0], position: [(x*res) as f32 * size, 1.0, (y*res) as f32 * size], padding: [0.0; 3]});
+                if x < width-2 && y < height-2 {
                     let i = x * height + y;
                     indices.append(&mut [i, i+1, i+height+1, i, i+height+1, i+height].to_vec());
                 }
             }
         }
-        let blank_vertices: Vec<_> = vec![Vertex {color: [1.0, 1.0, 1.0], normal: [0.0, 1.0, 0.0], position: [0.0, 0.0, 0.0]}; (width*height) as usize];
+        let vertices: Vec<_> = vec![Vertex {color: [1.0, 1.0, 1.0], normal: [0.0, 1.0, 0.0], position: [0.0, 0.0, 0.0]}; (width*height) as usize];
+        let src_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("Height Map Source Vertex Buffer")),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
+        });
         let dst_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("Height Map Vertex Buffer")),
-            contents: bytemuck::cast_slice(&blank_vertices),
+            label: Some(&format!("Height Map Output Vertex Buffer")),
+            contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
         });
         let dst_layout = 
@@ -258,7 +273,17 @@ impl HeightMap {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage {
-                            // We will change the values in this buffer
+                            read_only: true,
+                        },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }, wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage {
                             read_only: false,
                         },
                         has_dynamic_offset: false,
@@ -272,6 +297,9 @@ impl HeightMap {
             layout: &dst_layout,
             entries: &[BindGroupEntry {
                 binding: 0,
+                resource: src_buffer.as_entire_binding(),
+            }, BindGroupEntry {
+                binding: 1,
                 resource: dst_buffer.as_entire_binding(),
             }]
         });

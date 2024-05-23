@@ -5,6 +5,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
+    // @location(3) padding: vec3<f32>,
 };
 
 struct InstanceInput {
@@ -34,11 +35,13 @@ fn vs_main(
     var out: VertexOutput;
     out.clip_position = camera * model_matrix * vec4<f32>(model.position, 1.0);
     out.color = model.color;
-    out.normal = model.normal;
+    var rotation_matrix = mat3x3(model_matrix[0].xyz, model_matrix[1].xyz, model_matrix[2].xyz);
+    out.normal = rotation_matrix*model.normal;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4f(in.color*dot(in.normal, vec3f(0.0, 1.0, 0.0)), 1.0);
+    // return vec4f(in.color*dot(in.normal, vec3f(cos(time/10.0), sin(time/10.0), 0.0)), 1.0);
 }

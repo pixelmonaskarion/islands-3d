@@ -1,8 +1,8 @@
-use bespoke_engine::model::Model;
+use bespoke_engine::{instance::Instance, model::Model};
 use cgmath::{Quaternion, Rotation3, Vector3};
 use wgpu::Device;
 
-use crate::{game::Vertex, instance::Instance};
+use crate::game::Vertex;
 
 pub struct Water {
     pub model: Model,
